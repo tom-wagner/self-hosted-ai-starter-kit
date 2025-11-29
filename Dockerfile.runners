@@ -1,0 +1,50 @@
+# Base runner image (for code + launcher)
+FROM n8nio/runners:1.121.3-distroless AS base
+
+# Builder stage with Python 3.13 + Node 22 on Debian testing (glibc 2.38+) to add Playwright + extras.
+FROM debian:testing AS builder
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+# Install Python 3.13, nodejs 22 (via NodeSource), and Playwright system deps.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl gnupg python3.13 python3.13-venv python3-pip \
+ && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg \
+ && echo "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends nodejs tini \
+ && apt-get install -y --no-install-recommends \
+      libasound2t64 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 libdbus-1-3 \
+      libnss3 libnspr4 libdrm2 libxkbcommon0 libxdamage1 libxfixes3 libxcomposite1 \
+      libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libatspi2.0-0 libgtk-3-0 \
+      libxss1 libxtst6 libexpat1 libpulse0 fonts-liberation libwayland-client0 \
+      libwayland-egl1 libxshmfence1 \
+ && rm -rf /var/lib/apt/lists/*
+
+# task-runner-launcher expects node at /usr/local/bin/node; NodeSource installs to /usr/bin.
+# Provide a symlink so the JS runner can start.
+RUN ln -s /usr/bin/node /usr/local/bin/node
+
+# Copy the runner files from the base image (JS runner + launcher + python sources).
+COPY --from=base /opt /opt
+COPY --from=base /usr/local/bin/task-runner-launcher /usr/local/bin/task-runner-launcher
+# Override launcher config to allow env passthrough for stdlib/external allowlists.
+COPY runner.config.json /etc/n8n-task-runners.json
+
+# Optional Python extras for the native Python runner.
+COPY runners.extras.txt /opt/n8n/runners.extras.txt
+
+# Rebuild the Python venv on glibc and install the runner package + Playwright.
+RUN python3.13 -m venv --clear /opt/runners/task-runner-python/.venv \
+ && /opt/runners/task-runner-python/.venv/bin/pip install --no-cache-dir --upgrade pip \
+ && /opt/runners/task-runner-python/.venv/bin/pip install --no-cache-dir /opt/runners/task-runner-python \
+ && /opt/runners/task-runner-python/.venv/bin/pip install --no-cache-dir -r /opt/n8n/runners.extras.txt \
+ && /opt/runners/task-runner-python/.venv/bin/pip install --no-cache-dir playwright==1.56.0 \
+ && /opt/runners/task-runner-python/.venv/bin/python -m playwright install chromium
+
+# Final runtime image with glibc, node, python, runner code, and browsers.
+FROM builder AS runner
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN mkdir -p /home/runner
+ENTRYPOINT ["tini","--","/usr/local/bin/task-runner-launcher"]
+CMD ["javascript","python"]

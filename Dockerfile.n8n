@@ -3,6 +3,7 @@ FROM node:20-bookworm-slim
 # Ensure browsers download into the node user's cache so both Node.js and Python
 # Playwright installs share the same location.
 ENV PLAYWRIGHT_BROWSERS_PATH=/home/node/.cache/ms-playwright
+ARG N8N_VERSION=2.2.1
 
 # Install system dependencies, Python + pip for the Code node, and the
 # Playwright runtimes for both Node.js and Python.
@@ -35,10 +36,14 @@ RUN apt-get update \
  && mkdir -p /root/.cache/ms-playwright \
  && npm install -g pnpm \
  && npm install -g only-allow \
- && npm install -g n8n n8n-nodes-playwright playwright --force \
+ && npm install -g n8n@${N8N_VERSION} n8n-nodes-playwright playwright --force \
  && python3 -m pip install --no-cache-dir --break-system-packages playwright \
  && npx playwright install --with-deps chromium \
  && python3 -m playwright install chromium \
+ # Ensure root and node users share the same browser cache so Python/Node Playwright
+ # can find the headless shell even when PLAYWRIGHT_BROWSERS_PATH isn't propagated.
+ && mkdir -p /home/node/.cache/ms-playwright /root/.cache \
+ && ln -sfn /home/node/.cache/ms-playwright /root/.cache/ms-playwright \
  && mkdir -p /home/node/.cache/ms-playwright \
  && chown -R node:node /home/node/.cache \
  && apt-get clean \

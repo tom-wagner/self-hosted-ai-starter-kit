@@ -45,6 +45,8 @@ RUN python3.13 -m venv --clear /opt/runners/task-runner-python/.venv \
 # Final runtime image with glibc, node, python, runner code, and browsers.
 FROM builder AS runner
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN mkdir -p /root/.cache \
+ && ln -sfn /ms-playwright /root/.cache/ms-playwright
 RUN mkdir -p /home/runner
 ENTRYPOINT ["tini","--","/usr/local/bin/task-runner-launcher"]
 CMD ["javascript","python"]

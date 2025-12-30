@@ -135,6 +135,9 @@ nodes. To keep everything local, just remember to use the Ollama node for your
 language model and Qdrant as your vector store.
 
 > [!NOTE]
+> The `.env` file also ships with demo Google OAuth credentials (`GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET`) for convenience. They are not wired into the stack automatically, but you can opt to use them when configuring Google credentials inside n8n.
+
+> [!NOTE]
 > This starter kit is designed to help you get started with self-hosted AI
 > workflows. While it’s not fully optimized for production environments, it
 > combines robust components that work well together for proof-of-concept

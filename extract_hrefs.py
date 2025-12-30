@@ -1,13 +1,15 @@
 import asyncio
+import json
+import os
 from pathlib import Path
 from traceback import format_exc
 
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
-URL = "https://portal.onehome.com/en-US/properties?token=eyJPU04iOiJOU1RBUiIsInR5cGUiOiIxIiwiY29udGFjdGlkIjo3OTMzNzI0LCJzZXRpZCI6IjgxNTExNCIsInNldGtleSI6IjgyOCIsImVtYWlsIjoidHdhZ25lcjU1QGdtYWlsLmNvbSIsInJlc291cmNlaWQiOjAsImFnZW50aWQiOjE4NDQ3MiwiaXNkZWx0YSI6ZmFsc2UsIlZpZXdNb2RlIjoiMSJ9&SMS=0"
 DOWNLOAD_DIR = Path.cwd() / "downloads"
 VIEW_TIMEOUT = 15_000
 NAV_TIMEOUT = 60_000
+URLS_FILE = Path("urls.json")
 
 
 def log(message: str):
@@ -63,12 +65,25 @@ async def export_to_csv(page, download_dir: Path):
     return target_path
 
 
-async def run_workflow():
+def resolve_urls() -> list[str]:
+    env_urls = os.environ.get("URLS_JSON")
+    if env_urls:
+        return json.loads(env_urls)
+
+    if not URLS_FILE.exists():
+        raise FileNotFoundError("urls.json not found and URLS_JSON env not provided")
+
+    with URLS_FILE.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+async def run_workflow(url: str):
     summary: dict = {
         "status": "pending",
         "download_path": None,
         "steps": [],
         "traceback": None,
+        "url": url,
     }
     track = make_step_tracker(summary)
     download_dir = DOWNLOAD_DIR
@@ -84,8 +99,8 @@ async def run_workflow():
 
             try:
                 track("navigate", "started", "Navigating to property portal")
-                log("Navigating to property portal...")
-                await page.goto(URL, wait_until="networkidle", timeout=NAV_TIMEOUT)
+                log(f"Navigating to property portal: {url}")
+                await page.goto(url, wait_until="networkidle", timeout=NAV_TIMEOUT)
                 track("navigate", "ok")
 
                 track("close_overlay", "started", "Closing intro overlay")
@@ -127,8 +142,16 @@ async def run_workflow():
     return summary
 
 
-if __name__ == "__main__":
-    result = asyncio.run(run_workflow())
-    # Return value for external callers (if needed)
-    output = [{"json": result}]
+async def process_all_urls(urls: list[str]):
+    results = []
+    for url in urls:
+        print(f"Processing: {url}")
+        results.append(await run_workflow(url))
+    return results
 
+
+if __name__ == "__main__":
+    url_list = resolve_urls()
+    result = asyncio.run(process_all_urls(url_list))
+    # Return value for external callers (if needed)
+    output = [{"json": item} for item in result]

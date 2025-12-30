@@ -68,13 +68,27 @@ async def export_to_csv(page, download_dir: Path):
 def resolve_urls() -> list[str]:
     env_urls = os.environ.get("URLS_JSON")
     if env_urls:
-        return json.loads(env_urls)
+        data = json.loads(env_urls)
+    else:
+        if not URLS_FILE.exists():
+            raise FileNotFoundError(
+                "urls.json not found and URLS_JSON env not provided"
+            )
+        with URLS_FILE.open("r", encoding="utf-8") as file:
+            data = json.load(file)
 
-    if not URLS_FILE.exists():
-        raise FileNotFoundError("urls.json not found and URLS_JSON env not provided")
+    return [extract_url(entry) for entry in data]
 
-    with URLS_FILE.open("r", encoding="utf-8") as file:
-        return json.load(file)
+
+def extract_url(entry) -> str:
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        for key in ("href", "url", "link"):
+            value = entry.get(key)
+            if value:
+                return value
+    raise ValueError(f"Unable to find URL string in entry: {entry!r}")
 
 
 async def run_workflow(url: str):

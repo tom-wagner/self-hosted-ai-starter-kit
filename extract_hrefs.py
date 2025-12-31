@@ -1,4 +1,5 @@
 import asyncio
+import csv
 import json
 import os
 from pathlib import Path
@@ -191,6 +192,37 @@ async def run_workflow(url: str):
     return summary
 
 
+def iter_combined_csv_rows(csv_paths: list[Path]):
+    if not csv_paths:
+        log("iter_combined_csv_rows: No CSV files provided; skipping merge.")
+        return
+
+    log(
+        f"iter_combined_csv_rows: Combining rows from {len(csv_paths)} CSV file(s) without writing an intermediate file."
+    )
+    header_reference: list[str] | None = None
+
+    for csv_path in csv_paths:
+        log(f"iter_combined_csv_rows: Reading source CSV {csv_path}.")
+        with csv_path.open("r", newline="", encoding="utf-8") as source_file:
+            reader = csv.DictReader(source_file)
+            header = reader.fieldnames
+            if not header:
+                log(f"iter_combined_csv_rows: CSV {csv_path} is empty; skipping.")
+                continue
+
+            if header_reference is None:
+                header_reference = header
+                log("iter_combined_csv_rows: Header initialized for combined data stream.")
+            elif header != header_reference:
+                raise ValueError(
+                    f"iter_combined_csv_rows: Header mismatch detected in {csv_path.name}"
+                )
+
+            for row in reader:
+                yield dict(row)
+
+
 async def process_all_urls(urls: list[str]):
     log(f"process_all_urls: Starting processing for {len(urls)} URL(s).")
     results = []
@@ -209,5 +241,18 @@ if __name__ == "__main__":
     log(f"main: URL list ready with {len(url_list)} entries.")
     result = asyncio.run(process_all_urls(url_list))
     log("main: Workflow runner finished execution.")
-    # Return value for external callers (if needed)
-    output = [{"json": item} for item in result]
+    csv_paths = [
+        Path(item["download_path"])
+        for item in result
+        if item.get("download_path")
+    ]
+    record_count = 0
+    for record_count, obj in enumerate(iter_combined_csv_rows(csv_paths), start=1):
+        log(f"json_record_{record_count}: {json.dumps(obj)}")
+
+    if record_count == 0:
+        log("main: No rows found across downloaded CSVs; nothing to log.")
+    else:
+        log(
+            f"main: Finished logging {record_count} JSON record(s) aggregated across downloaded CSVs."
+        )

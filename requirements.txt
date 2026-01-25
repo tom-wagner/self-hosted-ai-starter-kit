@@ -1,3 +1,2 @@
 playwright>=1.42.0
-csv
 psycopg2-binary>=2.9.9

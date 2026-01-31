@@ -1,0 +1,19 @@
+{
+  "total": 50,
+  "matched": 40,
+  "unmatched": 10,
+  "match_rate": 0.8,
+  "mean_score": 0.833,
+  "median_score": 0.832,
+  "min_score": 0.6842,
+  "max_score": 0.8889,
+  "expectation_hits": 1,
+  "expectation_misses": 0,
+  "expectation_details": [
+    {
+      "json_address": "2628 Ulysses Street NE, Minneapolis",
+      "status": "hit",
+      "formatted_address": "2628 Ulysses Street Minneapolis, MN 55418"
+    }
+  ]
+}

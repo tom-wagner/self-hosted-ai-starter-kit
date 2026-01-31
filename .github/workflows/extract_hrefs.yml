@@ -28,26 +28,27 @@ jobs:
       - name: Run extract_hrefs.py
         run: python extract_hrefs.py
 
-      - name: Configure git author
-        run: |
-          git config user.email "actions@github.com"
-          git config user.name "GitHub Actions"
+      # - name: Configure git author
+      #   run: |
+      #     git config user.email "actions@github.com"
+      #     git config user.name "GitHub Actions"
 
-      - name: Commit CSV results to new branch
-        env:
-          BRANCH_NAME: href-export-${{ github.run_id }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          git checkout -b "$BRANCH_NAME"
-          if ls downloads/*.csv >/dev/null 2>&1; then
-            git add downloads/*.csv
-          else
-            echo "No CSV files found; skipping commit."
-            exit 0
-          fi
-          if git diff --cached --quiet; then
-            echo "No changes detected; skipping commit."
-            exit 0
-          fi
-          git commit -m "Add CSV export for run $RUN_ID"
-          git push origin "$BRANCH_NAME"
+      # - name: Commit CSV results to new branch
+      #   env:
+      #     BRANCH_NAME: href-export-${{ github.run_id }}
+      #     RUN_ID: ${{ github.run_id }}
+      #   run: |
+      #     git checkout -b "$BRANCH_NAME"
+      #     if ls downloads/*.csv >/dev/null 2>&1; then
+      #       git add downloads/*.csv
+      #     else
+      #       echo "No CSV files found; skipping commit."
+      #       exit 0
+      #     fi
+      #     if git diff --cached --quiet; then
+      #       echo "No changes detected; skipping commit."
+      #       exit 0
+      #     fi
+      #     git commit -m "Add CSV export for run $RUN_ID"
+      #     git push origin "$BRANCH_NAME"
+

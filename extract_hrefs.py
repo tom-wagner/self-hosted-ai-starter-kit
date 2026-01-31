@@ -2,10 +2,15 @@ import asyncio
 import csv
 import json
 import os
+import re
+from difflib import SequenceMatcher
 from pathlib import Path
+from typing import Any
 from traceback import format_exc
 
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+
+from database_client import DatabaseClient, DatabaseConfig
 
 DOWNLOAD_DIR = Path.cwd() / "downloads"
 VIEW_TIMEOUT = 15_000
@@ -26,10 +31,422 @@ PROPERTY_PORTAL_URLS = [
     # AUTO_SEARCH_V1:CARVER
     "https://portal.onehome.com/en-US/properties?token=eyJPU04iOiJOU1RBUiIsInR5cGUiOiIxIiwiY29udGFjdGlkIjo3OTMzNzI0LCJzZXRpZCI6IjgxNTEyNCIsInNldGtleSI6IjY2IiwiZW1haWwiOiJ0d2FnbmVyNTVAZ21haWwuY29tIiwicmVzb3VyY2VpZCI6MCwiYWdlbnRpZCI6MTg0NDcyLCJpc2RlbHRhIjpmYWxzZSwiVmlld01vZGUiOiIxIn0=&SMS=0",
 ]
+LOT_LOOKUP_LIMIT = int(os.environ.get("LOT_LOOKUP_LIMIT", "25"))
+LOT_MATCH_THRESHOLD = float(os.environ.get("LOT_MATCH_THRESHOLD", "0.65"))
+LOT_MATCH_MODE = os.environ.get("LOT_MATCH_MODE", "improved").lower()
+DB_CLIENT = DatabaseClient(DatabaseConfig())
 
 
 def log(message: str):
     print(f"[workflow] {message}")
+
+
+DIRECTION_TOKENS = {
+    "n",
+    "s",
+    "e",
+    "w",
+    "ne",
+    "nw",
+    "se",
+    "sw",
+    "north",
+    "south",
+    "east",
+    "west",
+    "northeast",
+    "northwest",
+    "southeast",
+    "southwest",
+}
+STREET_TYPE_TOKENS = {
+    "st",
+    "street",
+    "ave",
+    "avenue",
+    "rd",
+    "road",
+    "dr",
+    "drive",
+    "ln",
+    "lane",
+    "blvd",
+    "boulevard",
+    "cir",
+    "circle",
+    "ct",
+    "court",
+    "pl",
+    "place",
+    "ter",
+    "terrace",
+    "trl",
+    "trail",
+    "pkwy",
+    "parkway",
+    "way",
+}
+UNIT_TOKENS = {"apt", "unit", "suite", "ste"}
+
+
+def normalize_address(address: str | None, city: str | None) -> str:
+    address = (address or "").strip()
+    city = (city or "").strip()
+    if address and city:
+        return f"{address}, {city}"
+    return address or city
+
+
+def tokenize(value: str | None) -> list[str]:
+    if not value:
+        return []
+    cleaned = re.sub(r"[^\w\s#]", " ", value.lower())
+    return [token for token in cleaned.split() if token]
+
+
+def strip_unit_tokens(tokens: list[str]) -> list[str]:
+    for index, token in enumerate(tokens):
+        if token in UNIT_TOKENS or token.startswith("#"):
+            return tokens[:index]
+    return tokens
+
+
+def remove_unit_tokens(tokens: list[str]) -> list[str]:
+    return [token for token in tokens if token not in UNIT_TOKENS and not token.startswith("#")]
+
+
+def split_street_components(address: str | None) -> tuple[str | None, str | None]:
+    if not address:
+        return None, None
+    parts = tokenize(address)
+    if not parts:
+        return None, None
+    first = parts[0].rstrip()
+    if first.isdigit():
+        remainder = strip_unit_tokens(parts[1:])
+        return first, " ".join(remainder).strip() or None
+    remainder = strip_unit_tokens(parts)
+    return None, " ".join(remainder).strip() or None
+
+
+def extract_street_tokens(address: str | None) -> list[str]:
+    if not address:
+        return []
+    _, street_name = split_street_components(address)
+    tokens = tokenize(street_name)
+    return tokens
+
+
+def significant_street_tokens(tokens: list[str]) -> list[str]:
+    return [
+        token
+        for token in tokens
+        if token not in DIRECTION_TOKENS and token not in STREET_TYPE_TOKENS
+    ]
+
+
+def extract_postal_code(record: dict[str, Any]) -> str | None:
+    for key in ("Zip", "ZIP", "Zip Code", "PostalCode", "Postal Code", "Postal"):
+        value = record.get(key)
+        if not value:
+            continue
+        digits = "".join(ch for ch in str(value) if ch.isdigit())
+        if len(digits) >= 5:
+            return digits[:5]
+    address = record.get("Address")
+    city = record.get("City")
+    combined = normalize_address(address, city)
+    if combined:
+        return extract_zip_from_text(combined)
+    return None
+
+
+def city_variants(city: str | None) -> list[str]:
+    tokens = tokenize(city)
+    if not tokens:
+        return []
+    variants = {" ".join(tokens)}
+    if tokens[0] == "st":
+        variants.add("saint " + " ".join(tokens[1:]))
+    if tokens[0] == "saint":
+        variants.add("st " + " ".join(tokens[1:]))
+    return list(variants)
+
+
+def normalize_for_match(text: str) -> str:
+    tokens = remove_unit_tokens(tokenize(text))
+    return " ".join(tokens)
+
+
+def extract_house_number_from_text(text: str | None) -> str | None:
+    if not text:
+        return None
+    stripped = text.strip()
+    if not stripped:
+        return None
+    return stripped.split()[0]
+
+
+def extract_zip_from_text(text: str | None) -> str | None:
+    if not text:
+        return None
+    stripped = text.strip()
+    if not stripped:
+        return None
+    last_token = stripped.split()[-1]
+    digits = "".join(ch for ch in last_token if ch.isdigit())
+    if len(digits) >= 5:
+        return digits[:5]
+    return None
+
+
+def strip_trailing_state_tokens(tokens: list[str]) -> list[str]:
+    if tokens and tokens[-1].isalpha() and len(tokens[-1]) == 2:
+        return tokens[:-1]
+    return tokens
+
+
+def build_detail_tokens_from_text(
+    text: str | None,
+    house_number: str | None,
+    postal_code: str | None,
+) -> list[str]:
+    tokens = remove_unit_tokens(tokenize(text))
+    if house_number and tokens and tokens[0] == house_number.lower():
+        tokens = tokens[1:]
+    if postal_code and tokens and tokens[-1] == postal_code:
+        tokens = tokens[:-1]
+    tokens = strip_trailing_state_tokens(tokens)
+    return tokens
+
+
+def build_db_house_number(row: dict[str, Any], formatted: str | None) -> str | None:
+    anumber = row.get("anumber")
+    if anumber is not None:
+        prefix = (row.get("anumberpre") or "").strip()
+        suffix = (row.get("anumbersuf") or "").strip()
+        base = f"{anumber}"
+        return f"{prefix}{base}{suffix}" if prefix or suffix else base
+    if formatted:
+        return extract_house_number_from_text(formatted)
+    return None
+
+
+def make_like_fragment(value: str | None) -> tuple[str, str] | None:
+    if not value:
+        return None
+    lowered = value.lower().strip()
+    if not lowered:
+        return None
+    return "formatted_address ILIKE %s", f"%{lowered}%"
+
+
+def make_number_fragment(value: str | None) -> tuple[str, str] | None:
+    if not value:
+        return None
+    digits = "".join(ch for ch in value if ch.isdigit())
+    if not digits:
+        return None
+    return "formatted_address ILIKE %s", f"%{digits}%"
+
+
+def query_lot_candidates(fragments: list[tuple[str, str]]):
+    if not fragments:
+        return []
+    where_clause = " AND ".join(fragment for fragment, _ in fragments)
+    sql = f"SELECT * FROM lots WHERE {where_clause} LIMIT %s"
+    params = [value for _, value in fragments]
+    params.append(LOT_LOOKUP_LIMIT)
+    try:
+        return DB_CLIENT.query(sql, params)
+    except Exception as exc:  # pragma: no cover - defensive logging during runtime
+        log(f"lot_lookup: query failed - {exc}")
+        return []
+
+
+def fetch_lot_candidates(
+    address: str | None,
+    city: str | None,
+    postal_code: str | None,
+) -> list[dict[str, Any]]:
+    street_number, street_name = split_street_components(address)
+    street_tokens = extract_street_tokens(address)
+    significant_tokens = significant_street_tokens(street_tokens)
+    street_query = " ".join(significant_tokens) or street_name
+
+    city_fragments = [make_like_fragment(value) for value in city_variants(city)]
+    city_fragments = [fragment for fragment in city_fragments if fragment]
+    street_name_fragment = make_like_fragment(street_query)
+    number_fragment = make_number_fragment(street_number)
+    postal_fragment = make_number_fragment(postal_code)
+
+    strategies: list[list[tuple[str, str]]] = []
+    for city_fragment in city_fragments or [None]:
+        combined = [
+            fragment
+            for fragment in (city_fragment, street_name_fragment, number_fragment, postal_fragment)
+            if fragment
+        ]
+        if combined:
+            strategies.append(combined)
+
+        if postal_fragment and street_name_fragment and number_fragment:
+            strategies.append([postal_fragment, street_name_fragment, number_fragment])
+        if postal_fragment and number_fragment:
+            strategies.append([postal_fragment, number_fragment])
+        if city_fragment and street_name_fragment and number_fragment:
+            strategies.append([city_fragment, street_name_fragment, number_fragment])
+        if city_fragment and street_name_fragment:
+            strategies.append([city_fragment, street_name_fragment])
+        if street_name_fragment and number_fragment:
+            strategies.append([street_name_fragment, number_fragment])
+        if city_fragment and number_fragment:
+            strategies.append([city_fragment, number_fragment])
+        if postal_fragment and street_name_fragment:
+            strategies.append([postal_fragment, street_name_fragment])
+
+    if not number_fragment and postal_fragment:
+        strategies.append([postal_fragment])
+    if not number_fragment and street_name_fragment:
+        strategies.append([street_name_fragment])
+    if not number_fragment and city_fragments:
+        strategies.extend([[fragment] for fragment in city_fragments if fragment])
+
+    seen: set[tuple[str, ...]] = set()
+    for fragments in strategies:
+        key = tuple(fragment for fragment, _ in fragments)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows = query_lot_candidates(fragments)
+        if rows:
+            return rows
+    return []
+
+
+def fetch_number_zip_candidates(
+    house_number: str | None,
+    postal_code: str | None,
+) -> list[dict[str, Any]]:
+    fragments: list[tuple[str, str | int]] = []
+    if postal_code:
+        fragments.append(("zip = %s", postal_code))
+    if house_number:
+        if house_number.isdigit():
+            fragments.append(("anumber = %s", int(house_number)))
+        else:
+            fragments.append(("formatted_address ILIKE %s", f"{house_number} %"))
+    if not fragments:
+        return []
+    return list(query_lot_candidates(fragments))
+
+
+def number_zip_lot_lookup(record: dict[str, Any]) -> dict[str, Any] | None:
+    address = record.get("Address")
+    city = record.get("City")
+    postal_code = extract_postal_code(record)
+    combined_text = " ".join(part for part in (address, city, postal_code) if part)
+    if not combined_text:
+        return None
+
+    house_number = extract_house_number_from_text(address or combined_text)
+    zip_code = extract_zip_from_text(combined_text) or postal_code
+    if not house_number or not zip_code:
+        return None
+
+    candidates = fetch_number_zip_candidates(house_number, zip_code)
+    if not candidates:
+        return None
+
+    target_detail = " ".join(
+        build_detail_tokens_from_text(combined_text, house_number, zip_code)
+    )
+    best_row: dict[str, Any] | None = None
+    best_score = 0.0
+    for row in candidates:
+        formatted = row.get("formatted_address")
+        if not formatted:
+            continue
+        db_house = build_db_house_number(row, formatted)
+        db_zip = (row.get("zip") or "").strip() or extract_zip_from_text(formatted)
+        if not db_house or not db_zip:
+            continue
+        if db_house.lower() != house_number.lower():
+            continue
+        if db_zip != zip_code:
+            continue
+
+        candidate_detail = " ".join(
+            build_detail_tokens_from_text(formatted, db_house, db_zip)
+        )
+        score = SequenceMatcher(None, candidate_detail, target_detail).ratio()
+        if score > best_score:
+            best_row = row
+            best_score = score
+
+    if not best_row or best_score < LOT_MATCH_THRESHOLD:
+        return None
+
+    match = dict(best_row)
+    match["match_score"] = round(best_score, 4)
+    return match
+
+
+def lot_lookup(
+    record: dict[str, Any],
+    mode: str | None = None,
+) -> dict[str, Any] | None:
+    resolved_mode = (mode or LOT_MATCH_MODE).lower()
+    if resolved_mode in {"number_zip", "number-zip", "zip"}:
+        return number_zip_lot_lookup(record)
+    address = record.get("Address")
+    city = record.get("City")
+    postal_code = extract_postal_code(record)
+    target = normalize_address(address, city)
+    if not target:
+        return None
+
+    candidates = fetch_lot_candidates(address, city, postal_code)
+    if not candidates:
+        return None
+
+    target_number, _ = split_street_components(address)
+    target_street_tokens = significant_street_tokens(extract_street_tokens(address))
+    target_numeric_tokens = [
+        token for token in target_street_tokens if any(ch.isdigit() for ch in token)
+    ]
+    normalized_target = normalize_for_match(target)
+
+    best_row: dict[str, Any] | None = None
+    best_score = 0.0
+    for row in candidates:
+        formatted = row.get("formatted_address")
+        if not formatted:
+            continue
+        formatted_tokens = set(remove_unit_tokens(tokenize(formatted)))
+        if target_number and target_number not in formatted_tokens:
+            continue
+        if target_numeric_tokens and not any(
+            token in formatted_tokens for token in target_numeric_tokens
+        ):
+            continue
+        if target_street_tokens and not any(
+            token in formatted_tokens for token in target_street_tokens
+        ):
+            continue
+
+        normalized_formatted = normalize_for_match(formatted)
+        score = SequenceMatcher(None, normalized_formatted, normalized_target).ratio()
+        if score > best_score:
+            best_row = row
+            best_score = score
+
+    if not best_row or best_score < LOT_MATCH_THRESHOLD:
+        return None
+
+    match = dict(best_row)
+    match["match_score"] = round(best_score, 4)
+    return match
 
 
 def make_step_tracker(summary: dict):
@@ -248,7 +665,11 @@ if __name__ == "__main__":
     ]
     record_count = 0
     for record_count, obj in enumerate(iter_combined_csv_rows(csv_paths), start=1):
-        log(f"json_record_{record_count}: {json.dumps(obj)}")
+        payload = dict(obj)
+        log(obj)
+        # match = lot_lookup(payload)
+        # payload["lot_match"] = match
+        # log(f"json_record_{record_count}: {json.dumps(payload, default=str)}")
 
     if record_count == 0:
         log("main: No rows found across downloaded CSVs; nothing to log.")
